@@ -1,3 +1,4 @@
+"""Бот для проверки статуса домашнего задания."""
 import logging
 import os
 import time
