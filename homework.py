@@ -2,6 +2,7 @@
 import logging
 import os
 import time
+from http import HTTPStatus
 
 import requests
 from dotenv import load_dotenv
@@ -26,7 +27,6 @@ HOMEWORK_VERDICTS = {
     'reviewing': 'Работа взята на проверку ревьюером.',
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
-STATUS_LIST = ['approved', 'reviewing', 'rejected']
 
 
 logging.basicConfig(
@@ -37,6 +37,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+logger = logging.getLogger(__name__)
 
 
 def check_tokens():
@@ -48,24 +49,19 @@ def check_tokens():
     }
     missing = []
     for name, value in tokens.items():
-        if value:
-            logging.info(f'Токен {name} - OK')
-        else:
-            logging.critical(f'Токен {name} - ОТСУТСТВУЕТ!')
+        if not value:
             missing.append(name)
-    if missing:
-        raise exceptions.MissingTokenError(
-            f'Отсутвуют токены {", ".join(missing)}'
-        )
+    return missing
 
 
 def send_message(bot, message):
     """Отправка сообщения в телеграм при смене статуса."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
-        logging.debug(f'Сообщение отправлено {message}')
+        logger.debug('Сообщение отправлено %s', message)
     except Exception as e:
-        logging.error(f'Ошибка при отправке сообщения: {e}')
+        logger.error('Ошибка при отправке сообщения: %s', e)
+        raise exceptions.MessageError(f'Ошибка при отправке сообщения: {e}')
 
 
 def get_api_answer(timestamp):
@@ -77,14 +73,12 @@ def get_api_answer(timestamp):
             params=timestamp
         )
     except requests.exceptions.RequestException as e:
-        error_msg = f'Эндпоинт недоступен:{e}'
-        logging.error(error_msg)
-        raise ConnectionError(error_msg)
+        raise exceptions.APIConnectionError(f'Эндпоинт недоступен:{e}')
 
-    if response.status_code != 200:
-        error_msg = f'Ошибка: API вернул статус {response.status_code}'
-        logging.error(error_msg)
-        raise Exception(error_msg)
+    if response.status_code != HTTPStatus.OK:
+        raise exceptions.EmptyApiResponseError(
+            f'Ошибка: API вернул статус {response.status_code}'
+        )
 
     return response.json()
 
@@ -93,22 +87,22 @@ def check_response(response):
     """Проверка ответа на соответствие."""
     if not isinstance(response, dict):
         error_msg = ('Ответ Api не является словарём')
-        logging.error(error_msg)
+        logger.error(error_msg)
         raise TypeError(error_msg)
 
     if 'homeworks' not in response:
         error_msg = 'В ответе отсутствует ключ "homeworks"'
-        logging.error(error_msg)
-        raise KeyError(error_msg)
+        logger.error(error_msg)
+        raise exceptions.InvalidAPIResponseError(error_msg)
 
     homeworks = response.get('homeworks')
     if not isinstance(homeworks, list):
         error_msg = 'homeworks не является списком'
-        logging.error(error_msg)
+        logger.error(error_msg)
         raise TypeError(error_msg)
 
     if len(homeworks) == 0:
-        logging.debug('Новых работ нет')
+        logger.debug('Новых работ нет')
         return None
 
     last_homework = homeworks[0]
@@ -117,33 +111,37 @@ def check_response(response):
 
 def parse_status(homework):
     """Проверка статуса домашней работы."""
-    try:
-        status = homework.get('status')
-        homework_name = homework.get('homework_name')
+    if 'homework_name' not in homework:
+        error_msg = 'Отсутствует ключ "homework_name"'
+        logger.error(error_msg)
+        raise exceptions.HomeworkParseError(error_msg)
 
-        if homework_name is None:
-            error_msg = 'Отсутствует ключ "homework_name"'
-            logging.error(error_msg)
-            raise AssertionError(error_msg)
+    if 'status' not in homework:
+        error_msg = 'Отсутствует статус проверки задания'
+        logger.error(error_msg)
+        raise exceptions.HomeworkParseError(error_msg)
 
-        if status not in STATUS_LIST:
-            error_msg = 'Отсутствует статус проверки задания'
-            logging.error(error_msg)
-            raise ValueError(error_msg)
+    status = homework.get('status')
+    homework_name = homework.get('homework_name')
 
-        verdict = HOMEWORK_VERDICTS[status]
-        return f'Изменился статус проверки работы "{homework_name}". {verdict}'
-    except Exception as e:
-        logging.error(f'Ошибка {e}')
-        raise
+    if status not in HOMEWORK_VERDICTS:
+        logger.error('Неизвестный статус %s', status)
+        raise exceptions.HomeworkParseError(f'Неизвестный статус {status}')
+
+    verdict = HOMEWORK_VERDICTS[status]
+    return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
     """Основная логика работы бота."""
+    missing = check_tokens()
+    if missing:
+        error_msg = f'Отсутствуют токены: {",".join(missing)}'
+        logger.critical(error_msg)
+        raise exceptions.MissingTokenError(error_msg)
     bot = TeleBot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
     last_error_msg = None
-    check_tokens()
 
     while True:
         try:
@@ -153,24 +151,24 @@ def main():
                 message = parse_status(homework)
                 send_message(bot, message)
             else:
-                logging.debug('Новых статусов нет')
+                logger.debug('Новых статусов нет')
 
             last_error_msg = None
 
         except Exception as e:
             error_msg = f'Сбой в работе программы: {e}'
-            logging.critical(error_msg)
+            logger.critical('Сбой в работе программы: %s', e)
 
             if error_msg != last_error_msg:
                 try:
                     send_message(bot, error_msg)
-                    logging.info(
-                        'Пользователю было отправлено сообщение с ошибкой'
-                        f'{error_msg}'
+                    logger.info(
+                        'Пользователю было отправлено сообщение с ошибкой %s',
+                        error_msg
                     )
-                except Exception as send_err:
-                    logging.error(
-                        f'Не удалось отправить сообщение об ошибке{send_err}'
+                except exceptions.MessageError as send_err:
+                    logger.error(
+                        'Не удалось отправить сообщение об ошибке %s', send_err
                     )
                 last_error_msg = error_msg
         time.sleep(RETRY_PERIOD)
