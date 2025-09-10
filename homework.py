@@ -4,11 +4,10 @@ import os
 import time
 from http import HTTPStatus
 
+import exceptions
 import requests
 from dotenv import load_dotenv
 from telebot import TeleBot
-
-import exceptions
 
 load_dotenv()
 
@@ -76,7 +75,7 @@ def get_api_answer(timestamp):
         raise exceptions.APIConnectionError(f'Эндпоинт недоступен:{e}')
 
     if response.status_code != HTTPStatus.OK:
-        raise exceptions.EmptyApiResponseError(
+        raise exceptions.EmptyAPIResponseError(
             f'Ошибка: API вернул статус {response.status_code}'
         )
 
